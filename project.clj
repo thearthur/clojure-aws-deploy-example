@@ -17,7 +17,8 @@
                  [org.clojars.tbatchelli/vboxjws "4.2.4"]
                  [com.palletops/pallet-vmfest "0.3.0-alpha.5"]
                  [com.palletops/java-crate "0.8.0-beta.5"]
-                 [clj-aws-ec2 "0.3.0"]]
+                 [amazonica "0.1.15"]
+                 [com.palletops/lein-crate "0.8.0-alpha.1"]]
   :profiles {:dev
              {:dependencies
               [[com.palletops/pallet "0.8.0-RC.1"

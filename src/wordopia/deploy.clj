@@ -1,17 +1,20 @@
 (ns wordopia.deploy
+  (:use [amazonica.core]
+        [amazonica.aws.ec2])
   (:require [pallet.api :refer [converge group-spec node-spec plan-fn]]
             [pallet.configure :refer [compute-service]]
             [pallet.repl :refer [show-nodes]]
             [pallet.compute.vmfest :refer [add-image]]
             [pallet.crate :refer [nodes-in-group target-node]]
-            [pallet.actions :refer [exec-checked-script package package-manager]]
+            [pallet.actions :refer [exec-checked-script package package-manager remote-file]]
             [pallet.action :refer [clj-action]]
             [pallet.crate.java :as java]
             [pallet.core.user :refer [make-user]]
             [aws.sdk.ec2 :as ec2]
             [pallet.crate.automated-admin-user :refer [automated-admin-user]]
             [pallet.node :refer [primary-ip id] :as node]
-            [aws.sdk.ec2 :as ec2]))
+            [pallet.compute.jclouds]
+            [pallet.crate.lein :as lein]))
 
 (def instances
   {:aws (node-spec
@@ -64,22 +67,45 @@
   (group-spec "web-servers"
                :count count
                :node-spec (instances where)
-               :phases {:bootstrap automated-admin-user
+               :phases {:bootstrap (if-not (= :local where)
+                                     automated-admin-user
+                                     (plan-fn (println "no bootstrap for local")))
                         :configure
                         (plan-fn (package-manager :update)
                                  (package "git-core"))
-                        :install
+                        :webapp
                         (plan-fn
                          (exec-checked-script
                           "checkout project"
                           "mkdir -p /opt/web"
                           "rm /opt/web/wordopia-app -rf"
-                          "git clone https://github.com/thearthur/wordopia-app.git /opt/web/wordopia-app")
+                          "git clone https://github.com/thearthur/wordopia-app.git /opt/web/wordopia-app"))
+                        :local-start
+                        (plan-fn
+                         (exec-checked-script
+                          "start local server"
+                          "cd /opt/web/wordopia-app && nohup lein ring server &"))
+                        :start
+                        (plan-fn
+                         (remote-file
+                          "/etc/init.d/wordopia"
+                          :content "#!/bin/bash\ncd /opt/web/wordopia-app && exec nohup /usr/local/bin/lein ring server &"
+                          :owner "root" :group "root"
+                          :mode 755
+                          :overwrite-changes true)
+                         (exec-checked-script
+                          "start web app"
+                          "killall java || true" 
+                          "rm -f /etc/rc2.d/S10wordopia"
+                          "ln -s /etc/init.d/wordopia /etc/rc2.d/S10wordopia"
+                          "/etc/rc2.d/S10wordopia"
+                          "sleep 20")
                          (make-image))}
                :extends [(java/server-spec
                           {:vendor :oracle
                            :components #{:jdk}
-                               :version [7]})]))
+                           :version [7]})
+                         (lein/leiningen {})]))
 ; Who
 (def vmfest-user (make-user "vmfest" {:password "vmfest" :sudo-password "vmfest"
                                       :private-key-path (str (System/getenv "HOME") "/.ssh/id_rsa")
@@ -96,6 +122,8 @@
 (defn make-it-so [who what where]
   (converge 
    (what where)
-   :phase [:configure :install]
+   :phase (if (= :local where)
+            [:webapp :local-start]
+            [:configure :install :webapp :start])
    :compute (compute-service where)
    :user who))
