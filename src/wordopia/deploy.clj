@@ -10,11 +10,14 @@
             [pallet.action :refer [clj-action]]
             [pallet.crate.java :as java]
             [pallet.core.user :refer [make-user]]
-            [aws.sdk.ec2 :as ec2]
             [pallet.crate.automated-admin-user :refer [automated-admin-user]]
             [pallet.node :refer [primary-ip id] :as node]
             [pallet.compute.jclouds]
-            [pallet.crate.lein :as lein]))
+            [pallet.crate.lein :as lein]
+            [amazonica.aws.autoscaling :refer [create-launch-configuration create-auto-scaling-group
+                                               describe-auto-scaling-instances describe-auto-scaling-groups
+                                               delete-launch-configuration delete-auto-scaling-group
+                                               describe-auto-scaling-groups]]))
 
 (def instances
   {:aws (node-spec
@@ -42,16 +45,52 @@
             id (-> me id (.  split "/") second)
             image-name (str (node/group-name me) "-" id)
             cred (ec2-keys-form-file)
-            new-ami (ec2/create-image cred {:instance-id id
-                                            :name image-name
-                                            :description "image"})]
-        (while (->> new-ami :image-id ec2/image-id-filter
-                    (ec2/describe-images (ec2-keys-form-file)) first
+            new-ami (create-image
+                     cred
+                     :instance-id id
+                     :name image-name
+                     :description "image")]
+        (while (->> new-ami :image-id vector
+                    (describe-images (ec2-keys-form-file) :image-ids ) :images first
                     :state (not= "available"))
           (println "waiting for " new-ami "to become available")
           (Thread/sleep 5000))
         (println "created:" new-ami)
         new-ami)))
+
+(defn destroy-auto-scaling-group [image]
+  (let [cred (ec2-keys-form-file)
+        id (:image-id image)
+        name (str "wordopia-" id)
+        instances [] #_(->> name (describe-auto-scaling-groups (ec2-keys-form-file) :auto-scaling-group-name)
+                       :auto-scaling-groups first :instances (map :instance-id))]
+    (delete-auto-scaling-group (ec2-keys-form-file) :auto-scaling-group-name name)
+    (Thread/sleep 10000)
+    (delete-launch-configuration (ec2-keys-form-file) :launch-configuration-name name)
+    (Thread/sleep 10000)))
+
+(defn make-auto-scaling-group [load-balancer]
+  (when (= (class (node/compute-service (target-node))) pallet.compute.jclouds.JcloudsService)
+    (let [image (make-image)
+          cred (ec2-keys-form-file)
+          id (:image-id image)
+          name (str load-balancer "-" id)]
+       (create-launch-configuration cred
+                                    :launch-configuration-name name
+                                    :image-id (:image-id image)
+                                    :instance-type "m1.small"
+                                    :security-groups ["default"])
+       (create-auto-scaling-group cred
+                                  :load-balancer-names [load-balancer]
+                                  :auto-scaling-group-name name
+                                  :availability-zones ["us-east-1a" "us-east-1b"]
+                                  :desired-capacity 2
+                                  :health-check-grace-period 300
+                                  :health-check-type "ELB"
+                                  :launch-configuration-name name
+                                  :min-size 0
+                                  :max-size 2)
+      (describe-auto-scaling-groups (ec2-keys-form-file) :auto-scaling-group-name "aws_autoscale_grp"))))
 
 (defn load-balancer [count where]
   (group-spec "load-balancers"
@@ -61,7 +100,7 @@
                         :configure
                         (plan-fn
                          (println "using web servers:" (ips-in-group :web-servers))
-                         (make-image))}))
+                         (make-auto-scaling-group "lbs"))}))
 
 (defn web-server [count where]
   (group-spec "web-servers"
@@ -100,7 +139,7 @@
                           "ln -s /etc/init.d/wordopia /etc/rc2.d/S10wordopia"
                           "/etc/rc2.d/S10wordopia"
                           "sleep 20")
-                         (make-image))}
+                         (make-auto-scaling-group "wordopia"))}
                :extends [(java/server-spec
                           {:vendor :oracle
                            :components #{:jdk}
